@@ -34,7 +34,10 @@ NAME_RE = re.compile(rb"^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}\Z")
 def encode(mtype, payload=b"", status=0):
     """Return the bytes of one complete ETP message: header + payload."""
     # TODO: pack the header with HEADER.pack(...) and append the payload.
-    raise NotImplementedError
+    # compute the length of the payload and include it in the header. 
+    # build the header using the VERSION, mtype, status, reserved (0), and length of the payload.
+    # append payload to the header and return the complete message as bytes.
+    return HEADER.pack(VERSION, mtype, status, 0, len(payload)) + payload
 
 
 def read_message(conn, transport):
@@ -45,7 +48,26 @@ def read_message(conn, transport):
     the payload, and why?
     """
     # TODO
-    raise NotImplementedError
+    raw = transport.recv_exact(conn, HEADER_SIZE)  # read the header
+    version, mtype, status, reserved, length = HEADER.unpack(raw)  # unpack
+    
+    # check version, mtype, status, length according to the specification's order
+    if version != VERSION:
+        raise ValueError(f"bad version: {version}")
+    if length > MAX_LEN:
+            raise ValueError(f"length too large: {length}")
+    if reserved != 0:
+        raise ValueError(f"reserved field must be 0, got: {reserved}") # check if reserved is 0, as per the specification
+    if status not in {0, BAD_VERSION, BAD_TYPE, NOT_FOUND, BAD_NAME
+    , TOO_LARGE, BAD_REQUEST, NOT_READY, SERVER_ERROR}:
+            raise ValueError(f"bad status: {status}")
+    if mtype not in {HELLO, LIST, GET, PUT, BYE, HELLO_OK, LIST_OK, GET_OK, PUT_OK, BYE_OK, ERROR}:
+        raise ValueError(f"bad type: {mtype}")
+    
+    payload = transport.recv_exact(conn, length) if length > 0 else b""  # read the payload if length > 0, else empty bytes
+    
+    return version, mtype, status, length, payload  # return the unpacked values and payload
+    
 
 
 def valid_name(name_bytes):
