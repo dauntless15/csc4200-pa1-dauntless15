@@ -33,7 +33,7 @@ log_lock = threading.Lock()  # create a lock for synchronizing access to the log
 
 # log response
 def log_response(peer, request_type, status, request_length):
-    timestamp = datetime.now().astimezone().strftime(
+    timestamp = datetime.now().astimezone().strftime( # get the current timestamp in ISO 8601 format with timezone information
         "%Y-%m-%dT%H:%M:%S.%f"
     )[:-3] # format the timestamp to include milliseconds
 
@@ -56,14 +56,14 @@ def log_response(peer, request_type, status, request_length):
     )
 
     with log_lock: # acquire the lock to ensure that only one thread writes to the log at a time
-        sys.stdout.write(line)
-        sys.stdout.flush()
+        sys.stdout.write(line) # write the log line to standard output
+        sys.stdout.flush() # flush the output buffer to ensure that the log line is written immediately
 
 
 # send response
 def send_response(conn, peer, request_type,
                   request_length, response_type,
-                  status=0, payload=b""):
+                  status=0, payload=b""): # send a response message to the client and log it
 
     message = etp.encode( # encode the response message with the specified response type, status, and payload
         response_type,
@@ -99,301 +99,350 @@ def send_error(conn, peer, request_type,
 
 # hello
 def handle_hello(payload, state):
-    """Handle a HELLO request (Specification, Section 5.1).
-
-    Return the bytes of the response message.
-    """
     if state != "AWAIT_HELLO": # if the state is not AWAIT_HELLO, it means we have already received a HELLO message from this client, so we should return an error response
-        return etp.encode(etp.ERROR, etp.BAD_REQUEST, b"HELLO not first message")
+        return etp.ERROR, etp.BAD_REQUEST, b"HELLO not first message"
 
-    # client name must be 1-32 ascii letters, digits, hyphen or underscore (Specification, Section 7)
-    if not (
-        1 <= len(payload) <= 32 and all(0x21 <= byte <= 0x7E for byte in payload)
-    ):
-        return etp.encode(etp.ERROR, b"Invalid client name", etp.BAD_REQUEST)
+    # Client name: 1-32 printable ASCII bytes.
+    if not (1 <= len(payload) <= 32 and 
+            all(0x21 <= byte <= 0x7E for byte in payload)):
+        return etp.ERROR, etp.BAD_REQUEST, b"Invalid client name" # return the response message with ERROR, BAD_REQUEST, and an error message
 
-    # change this to a required server name if you want to check it (Specification, Section 5.1)
-    server_name = b"ETP/1 Server"
+    return etp.HELLO_OK, 0, b"ETP/1 Server" # return the response message with HELLO_OK, status 0, and the server name
 
-    return etp.HELLO_OK, 0, server_name # return the response message with HELLO_OK, server name, and status 0
 
 def handle_list(payload, root):
-    if len(payload) != 0:
-        return etp.encode(etp.ERROR, b"LIST request must have empty payload", etp.BAD_REQUEST)
+    if payload: # if the payload is not empty, return an error response with BAD_REQUEST status
+        return etp.ERROR, etp.BAD_REQUEST, b"LIST payload must be empty"
 
-    entries = []
+    entries = [] 
 
-    try: 
-        with os.scandir(root) as quandale:
-            for entry in quandale:
-                name = os.fsencode(entry.name)
+    try: # list the files in the root directory and filter out invalid names, symlinks, and non-regular files
+        with os.scandir(root) as directory: # use os.scandir to iterate over the entries in the root directory
+            for entry in directory:
+                name = os.fsencode(entry.name) # encode the entry name to bytes
 
-                # ignore invalid filenames (Specification, Section 7)
-                if not (1 <= len(name) <= 32 and all(0x21 <= byte <= 0x7E for byte in name)):
+                # Only valid names and regular files; exclude symlinks.
+                if not etp.valid_name(name):
                     continue
 
-                try:
-                    # Symlinks and directories that is not a regular file are not allowed (Specification, Section 7)
-                    if entry.is_symlink() or entry.is_file(follow_symlinks=False) and not entry.is_dir():
+                try: # check if the entry is a symlink or not a regular file, and skip it if so
+                    if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
                         continue
 
                     size = entry.stat(follow_symlinks=False).st_size
                     entries.append((name, size))
 
-                except OSError:
+                except OSError: # if an OSError occurs while checking the entry, skip it and continue to the next entry
                     continue
 
-        entries.sort(key=lambda x: x[0])  # sort by name (Specification, Section 7)
+        # Sort by filename bytes.
+        entries.sort(key=lambda item: item[0])
 
         result = bytearray() # create a bytearray to hold the result
-        for name, size in entries:
-            result.extend(name + b"\t" + str(size).encode() + b"\n")  # append name and size to the result
+        for name, size in entries: # iterate over the sorted entries and append the name and size to the result bytearray
+            result.extend(name + b"\t" + str(size).encode("ascii") + b"\n")
 
-        if len(result) > etp.MAX_LEN:
-            return etp.encode(etp.ERROR, etp.SERVER_ERROR, b"LIST response too long") # check if the result is too long
+        if len(result) > etp.MAX_LEN: # if the length of the result exceeds the maximum allowed length, return an error response with SERVER_ERROR status
+            return etp.ERROR, etp.SERVER_ERROR, b"LIST response too large"
 
-        return etp.LIST_OK, 0, bytes(result) # return the response message with LIST_OK, status 0, and the result
+        return etp.LIST_OK, 0, bytes(result) # return the response message with LIST_OK, status 0, and the result as bytes
 
-    except OSError:
-        return etp.encode(etp.ERROR, etp.SERVER_ERROR, b"Failed to list directory and files") # return an error response if there was an OSError
+    except OSError: # if an OSError occurs while listing the directory, return an error response with SERVER_ERROR status
+        return etp.ERROR, etp.SERVER_ERROR, b"Could not list directory"
 
                 
 # Get handler
 def handle_get(payload, root):
-    if not etp.valid_name(payload):
-        return etp.encode(etp.ERROR, etp.BAD_REQUEST, b"GET request has invalid filename") # check if the filename is valid
+    if not etp.valid_name(payload): # if the filename is not valid, return an error response with BAD_NAME status
+        return etp.ERROR, etp.BAD_NAME, b"Invalid filename"
 
-    path = os.path.join(root, os.fsdecode(payload)) # create the full path to the file
+    path = os.path.join(root, os.fsdecode(payload)) # create the full path to the file by joining the root directory and the decoded filename
 
-    flags = os.O_RDONLY # open the file in read-only mode
+    flags = os.O_RDONLY # set the flags to open the file in read-only mode
+    if hasattr(os, "O_NOFOLLOW"): # if the O_NOFOLLOW flag is available, add it to the flags to prevent following symlinks
+        flags |= os.O_NOFOLLOW
 
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW # prevent following symlinks
-
-    try: # check to see if file exists and if it is regular
-        fileOpen = os.open(path, flags) # open the file
-
-    except FileNotFoundError:
-        return etp.encode(etp.ERROR, etp.NOT_FOUND, b"File not found") # return an error response if the file was not found
-
-    except IsADirectoryError:
-        return etp.encode(etp.ERROR, etp.NOT_FOUND, b"File is a directory") # return an error response if the file is a directory (edge case maybe)
-
-    except OSError:
-        err = sys.exc_info()[1] # get the error info
-        if err.errno in (40,): # ELOOP is only error that can be raised by O_NOFOLLOW, so if we get it, it means the file is a symlink
-            return etp.encode(etp.ERROR, etp.BAD_REQUEST, b"File is a symlink") # return an error response if the file is a symlink
+    fd = None # initialize the file descriptor to None
 
     try:
-        fileStat = os.fstat(fileOpen) # get the file stats
+        fd = os.open(path, flags) # open the file with the specified flags and get the file descriptor
 
-        if not stat.S_ISREG(fileStat.st_mode): # check if the file is regular
-            return etp.encode(etp.ERROR, etp.BAD_REQUEST, b"File is not regular") # return an error response if the file is not regular
+        info = os.fstat(fd) # get the file information using fstat on the file descriptor
 
-        # file must git within max length
-        if fileStat.st_size > etp.MAX_LEN:
-            return etp.encode(etp.ERROR, etp.SERVER_ERROR, b"File too large") # return an error response if the file is too large
+        if not stat.S_ISREG(info.st_mode): # if the file is not a regular file, return an error response with NOT_FOUND status
+            return etp.ERROR, etp.NOT_FOUND, b"File not found"
 
-        with os.fdopen(fileOpen, "rb") as f: # open the file in binary mode
-            fileData = -1
-            data = f.read(etp.MAX_LEN + 1) # read the file data
+        if info.st_size > etp.MAX_LEN: # if the file size exceeds the maximum allowed length, return an error response with SERVER_ERROR status
+            return etp.ERROR, etp.SERVER_ERROR, b"File too large"
 
-        if len(data) > etp.MAX_LEN: # check if the file data is too large
-            return etp.encode(etp.ERROR, etp.SERVER_ERROR, b"File too large") # return an error response if the file is too large   
+        with os.fdopen(fd, "rb") as file: # open the file descriptor as a file object in binary read mode
+            fd = None  # fdopen now owns and closes the descriptor.
+            data = file.read(etp.MAX_LEN + 1)
+
+        if len(data) > etp.MAX_LEN: # if the length of the data read from the file exceeds the maximum allowed length, return an error response with SERVER_ERROR status
+            return etp.ERROR, etp.SERVER_ERROR, b"File too large"
 
         return etp.GET_OK, 0, data # return the response message with GET_OK, status 0, and the file data
-    except OSError:
-        return etp.encode(etp.ERROR, etp.SERVER_ERROR, b"Failed to read file") # return an error response if there was an OSError
-    finally:
-        if fileData != -1:
-            os.close(fileOpen) # close the file descriptor if it was opened
 
+    except FileNotFoundError: # if the file was not found, return an error response with NOT_FOUND status
+        return etp.ERROR, etp.NOT_FOUND, b"File not found"
+
+    except IsADirectoryError: # if the path is a directory, return an error response with NOT_FOUND status
+        return etp.ERROR, etp.NOT_FOUND, b"File not found"
+
+    except OSError as error: # if an OSError occurs, check the error number to determine the appropriate response
+        if error.errno == getattr(__import__("errno"), "ELOOP", -1):
+            return etp.ERROR, etp.NOT_FOUND, b"File not found"
+
+        return etp.ERROR, etp.SERVER_ERROR, b"Could not read file"
+
+    finally: # in the finally block, check if the file descriptor is not None, and if so, close it to release the resource
+        if fd is not None:
+            os.close(fd)
+    
 # PUT handler
 def handle_put(payload, root):
-    if len(payload) < 2: # name lenght has to be at least 2 bytes
-        return etp.encode(etp.ERROR, etp.BAD_REQUEST, b"PUT request too short") # check if the payload is too short
+    if len(payload) < 2: # if the payload length is less than 2, return an error response with BAD_REQUEST status
+        return etp.ERROR, etp.BAD_REQUEST, b"PUT payload too short"
 
-    nameLen = int.from_bytes(payload[:2], "big") # get the name length from the first 2 bytes of the payload
+    name_length = int.from_bytes(payload[:2], "big") # get the name length from the first 2 bytes of the payload, interpreting it as a big-endian integer
 
-    if nameLen > len(payload) - 2: # check if the name length is greater than the payload length minus 2
-        return etp.encode(etp.ERROR, etp.BAD_REQUEST, b"PUT request has invalid name length") # return an error response if the name length is invalid
+    if name_length > len(payload) - 2: # if the name length is greater than the remaining payload length, return an error response with BAD_REQUEST status
+        return etp.ERROR, etp.BAD_REQUEST, b"Invalid filename length"
 
-    name = payload[2:2 + nameLen] # get the name from the payload
-    fileData = payload[2 + nameLen:] # get the file data from the payload
+    name = payload[2:2 + name_length] # get the filename from the payload, slicing it from index 2 to index 2 + name_length
+    file_data = payload[2 + name_length:] # get the file data from the payload, slicing it from index 2 + name_length to the end of the payload
 
-    # validate name before creating patth
-    if not etp.valid_name(name):
-        return etp.encode(etp.ERROR, etp.BAD_REQUEST, b"PUT request has invalid filename") # check if the filename is valid
+    if not etp.valid_name(name): # if the filename is not valid according to the ETP specification, return an error response with BAD_NAME status
+        return etp.ERROR, etp.BAD_NAME, b"Invalid filename"
 
-    path = os.path.join(root, os.fsdecode(name)) # create the full path to the file
+    # Build the destination path from the trusted root and the validated name.
+    path = os.path.join(root, os.fsdecode(name))
+    # Track the temporary path so it can be removed if the write does not finish.
+    temp_path = None
 
-    tempPath = None
-
-    # write to a temporary file first, then rename it to the final name (Specification, Section 7)
     try:
-        fd, tempPath = tempfile.mkstemp(prefix=".etp-", dir=root) # create a temporary file in the root directory
+        # Create the temporary file in the same directory so replacement is atomic.
+        fd, temp_path = tempfile.mkstemp(prefix=".etp-", dir=root)
 
-        with os.fdopen(fd, "wb") as f: # open the temporary file in binary write mode
-            f.write(fileData) # write the file data to the temporary file
-            f.flush() # flush the file buffer to ensure all data is written to disk
-            os.fsync(f.fileno()) # force the file to be written to disk
+        # Convert the descriptor into a binary file object and write all payload data.
+        with os.fdopen(fd, "wb") as file:
+            file.write(file_data)
+            # Flush Python's buffer before asking the OS to persist the file contents.
+            file.flush()
+            os.fsync(file.fileno())
 
-        # atomic replacement of the temporary file with the final name (Specification, Section 7) -> why 
-        os.replace(tempPath, path) # rename the temporary file to the final name
-        tempPath = None # set tempPath to None to avoid deleting it in the finally block
+        # Replace the destination only after the complete temporary file is ready.
+        os.replace(temp_path, path)
+        # The temporary path no longer exists after replacement, so skip cleanup.
+        temp_path = None
 
-        digest = hashlib.sha256(fileData).digest() # calculate the SHA-256 digest of the file data
-
-        return etp.PUT_OK, digest, 0 # return the response message with PUT_OK, the digest, and status 0
+        # Compute the SHA-256 digest that the client can use to verify the upload.
+        digest = hashlib.sha256(file_data).digest()
+        # Return the response type, success status, and digest payload.
+        return etp.PUT_OK, 0, digest
 
     except OSError:
-        return etp.encode(etp.ERROR, etp.SERVER_ERROR, b"Can't store file") # return an error response if there was an OSError
+        # Report filesystem failures using the protocol's server-error response.
+        return etp.ERROR, etp.SERVER_ERROR, b"Could not store file"
 
     finally:
-        if tempPath is not None: # if the temporary file still exists, delete it
+        # If replacement did not happen, remove the leftover temporary file.
+        if temp_path is not None:
             try:
-                os.unlink(tempPath) # delete the temporary file
+                os.unlink(temp_path)
             except OSError:
-                pass # ignore any errors that occur while deleting the temporary file
+                # Cleanup failure should not hide the original write/replace result.
+                pass
 
+
+    
 def handle_bye(payload):
-    if len(payload) != 0: # check if the payload is empty
-        return etp.encode(etp.ERROR, etp.BAD_REQUEST, b"BYE request must have empty payload") # return an error response if the payload is not empty
+    # BYE is valid only when it carries no payload bytes.
+    if payload:
+        return etp.ERROR, etp.BAD_REQUEST, b"BYE payload must be empty"
 
-    return etp.BYE_OK, 0, b"" # return the response message with BYE_OK, status 0, and an empty payload
-
+    # An empty BYE payload is accepted; the session loop will then close the session.
+    return etp.BYE_OK, 0, b""
 
 
 def handle_session(conn, peer, root):
-    """Serve one client from HELLO to BYE (Specification, Sections 5-8).
-
-    TODO: loop reading requests with etp.read_message, apply the checks in
-    Section 8.1 in order, send exactly one response per request, log one line
-    per response (Section 9), and close when the session ends -- for any reason.
-    A failure here must end THIS session only, never the server.
-    """
-    state = "AWAIT_HELLO"  # initial state
+    # Each client connection begins before the required HELLO handshake.
+    state = "AWAIT_HELLO"
 
     try:
+        # Keep serving requests on this connection until a close condition occurs.
         while True:
-            try: # read request handler and payload
-                version, mtype, status, length, payload = etp.read_message(conn, transport.recv_all)
+            try:
+                # Read and decode one complete request through the transport seam.
+                version, mtype, status, length, payload = etp.read_message(
+                    conn, transport
+                )
 
-            except transport.ConnectionClosed: # client disconnected at/during the msg
-                break
-            except(OSError, ValueError):
+            except transport.ConnectionClosed:
+                # The peer closed before a complete request was available.
                 break
 
-            # check version, mtype, status, length according to the specification's order
-            # check the version
+            except (OSError, ValueError):
+                # Stop this session if reading the message fails or its header is invalid.
+                break
+
+            # Reject unsupported protocol versions and end this session.
             if version != etp.VERSION:
-                send_error(conn, peer, mtype, length, etp.BAD_VERSION, "not the right version")
+                send_error(
+                    conn, peer, mtype, length,
+                    etp.BAD_VERSION, "Invalid protocol version"
+                )
                 break
 
-            #check mtype
-            if mtype not in(
+            # Reject payloads beyond the protocol limit; this error is fatal.
+            if length > etp.MAX_LEN:
+                send_error(
+                    conn, peer, mtype, length,
+                    etp.TOO_LARGE, "Message too large"
+                )
+                break
+
+            # read_message has already received the payload; now allow request types only.
+            if mtype not in (
                 etp.HELLO,
                 etp.LIST,
                 etp.GET,
                 etp.PUT,
                 etp.BYE
             ):
-                send_error(conn, peer, mtype, length, etp.BAD_TYPE, "Invalid message type")
+                send_error(
+                    conn, peer, mtype, length,
+                    etp.BAD_TYPE, "Invalid message type"
+                )
+                # A nonfatal bad-type error does not prevent another request.
                 continue
 
-            # check status
-            if status != 0:
-                send_error(conn, peer, mtype, length, etp.BAD_REQUEST, "Status must be 0")
-                continue
-
-            # check length
-            if length > etp.MAX_LEN:
-                send_error(conn, peer, mtype, length, etp.TOO_LARGE, "Message too large")
-                continue
-
-            # check session state
+            # Require HELLO before accepting any other request in this session.
             if state == "AWAIT_HELLO" and mtype != etp.HELLO:
-                send_error(conn, peer, mtype, length, etp.BAD_REQUEST, "HELLO must be first message")
-                continue
+                send_error(
+                    conn, peer, mtype, length,
+                    etp.NOT_READY, "HELLO must be the first message"
+                )
+                break
 
-            #process the request based on the message type
+            # Dispatch the request to its type-specific handler.
             if mtype == etp.HELLO:
-                response_type, response_payload, response_status = handle_hello(payload, state)
+                response_type, response_status, response_payload = (
+                    handle_hello(payload, state)
+                )
 
                 if response_type == etp.HELLO_OK:
-                    state = "READY"  # change the state to READY after a successful HELLO response
+                    # Permit later requests only after a successful handshake.
+                    state = "READY"
 
             elif mtype == etp.LIST:
-                response_type, response_status, response_payload = handle_list(payload, root)
+                response_type, response_status, response_payload = (
+                    handle_list(payload, root)
+                )
 
             elif mtype == etp.GET:
-                response_type, response_status, response_payload = handle_get(payload, root)
+                response_type, response_status, response_payload = (
+                    handle_get(payload, root)
+                )
 
             elif mtype == etp.PUT:
-                response_type, response_payload, response_status = handle_put(payload, root)
+                response_type, response_status, response_payload = (
+                    handle_put(payload, root)
+                )
 
             elif mtype == etp.BYE:
-                response_type, response_status, response_payload = handle_bye(payload)
+                response_type, response_status, response_payload = (
+                    handle_bye(payload)
+                )
 
-            # send and log response
+            # Send one response matching the request and record it in the server log.
             try:
-                send_response(conn, peer, mtype, length, response_type, response_status, response_payload)
-            except(BrokenPipeError, ConnectionResetError, transport.ConnectionClosed):
+                send_response(
+                    conn,
+                    peer,
+                    mtype,
+                    length,
+                    response_type,
+                    status=response_status,
+                    payload=response_payload
+                )
+
+            except (BrokenPipeError, ConnectionResetError,
+                    transport.ConnectionClosed, OSError):
+                # The peer or transport is gone, so there is nowhere to send a response.
                 break
 
-            # end session if BYE was received
-            if response_status in etp.FATAL_ERRORS: # if the response status is a fatal error, end the session
+            # Fatal protocol errors require the server to close this session.
+            if response_status in etp.FATAL_ERRORS:
                 break
-            if mtype == etp.BYE:
+
+            # End the session after acknowledging a valid BYE.
+            if mtype == etp.BYE and response_type == etp.BYE_OK:
                 break
 
     except Exception as error:
-        # error in 1 session should not affect other sessions, so we catch all exceptions here and log them
-        print(f"etp-server: error in session with {peer}: {error}", file=sys.stderr, flush=True)
+        # Log unexpected failures without taking down the server or other sessions.
+        print(
+            f"etp-server: error in session with {peer}: {error}",
+            file=sys.stderr,
+            flush=True
+        )
 
     finally:
-        transport.close(conn)  # close the connection when the session ends
+        # Always release this connection, including when reading or handling failed.
+        transport.close(conn)
 
+    
 # my new code ends
 
 def main():
+    # Define the command-line options required to start the server.
     ap = argparse.ArgumentParser(description="ETP/1 server")
-    ap.add_argument("--port", type=int, required=True)
-    ap.add_argument("--root", required=True)
-    ap.add_argument("--bind", default="127.0.0.1")
+    ap.add_argument("--port", type=int, required=True)  # TCP port where the server listens.
+    ap.add_argument("--root", required=True)  # Directory used to serve and store files.
+    ap.add_argument("--bind", default="127.0.0.1")  # Address to bind; defaults to loopback.
+    # Parse the supplied options into the args object.
     args = ap.parse_args()
+    # Do not start listening if the requested file root is missing.
     if not os.path.isdir(args.root):
+        # Send the diagnostic to stderr and indicate invalid server configuration.
         print(f"etp-server: root directory {args.root!r} does not exist", file=sys.stderr)
         return 2
 
-    # TODO: listen through the transport, then accept sessions forever,
-    # serving each one so that a stalled client cannot delay the others
-    # (Specification, Section 9: Concurrency).
-    
+    # Open a listener through the transport abstraction.
     try:
         listener = transport.listen(args.bind, args.port) # listen for incoming connections
     except OSError as error:
+        # Report startup failure and return a nonzero process status.
         print(f"etp-server: failed to listen on {args.bind}:{args.port}: {error}", file=sys.stderr)
         return 1
 
     try:
+        # Accept clients continuously; each accepted connection gets its own worker.
         while True:
             try:
                 conn, peer = transport.accept(listener) # accept the new client
 
             except OSError as error:
+                # Log an accept failure, then keep the listener available for later clients.
                 print(f"etp-server: failed to accept connection: {error}", file=sys.stderr, flush=True) # log the error and continue to accept new connections
                 continue
 
-            clientThread = threading.Thread(target=handle_session, args=(conn, peer, args.root), demon=True) # create a new thread to handle the session with the client
+            # Run this session in a daemon thread so a slow client won't block accepting others.
+            clientThread = threading.Thread(target=handle_session, args=(conn, peer, args.root), daemon=True) # create a new thread to handle the session with the client
+            # Start the worker so it can handle the connection independently.
             clientThread.start() # start the thread to handle the session with the client
 
     finally:
+        # Close the listening socket if the accept loop exits.
         transport.close_listener(listener)  # close the listener when the server is shutting down
 
 
 if __name__ == "__main__":
+    # Run main only when this file is executed directly, not when imported.
     try:
         sys.exit(main())
     except KeyboardInterrupt:
+        # Treat Ctrl+C as a normal server shutdown.
         sys.exit(0)
