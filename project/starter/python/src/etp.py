@@ -51,7 +51,7 @@ def read_message(conn, transport):
     raw = transport.recv_exact(conn, HEADER_SIZE)  # read the header
     version, mtype, status, reserved, length = HEADER.unpack(raw)  # unpack
     
-    # check version, mtype, status, length according to the specification's order
+    """ # check version, mtype, status, length according to the specification's order
     if version != VERSION:
         raise ValueError(f"bad version: {version}")
     if length > MAX_LEN:
@@ -62,7 +62,11 @@ def read_message(conn, transport):
     , TOO_LARGE, BAD_REQUEST, NOT_READY, SERVER_ERROR}:
             raise ValueError(f"bad status: {status}")
     if mtype not in {HELLO, LIST, GET, PUT, BYE, HELLO_OK, LIST_OK, GET_OK, PUT_OK, BYE_OK, ERROR}:
-        raise ValueError(f"bad type: {mtype}")
+        raise ValueError(f"bad type: {mtype}") """
+
+    # handle error cases according to the specification's order
+    if version != VERSION or length > MAX_LEN:
+        return version, mtype, status, length, b""  # return empty payload for errors
     
     payload = transport.recv_exact(conn, length) if length > 0 else b""  # read the payload if length > 0, else empty bytes
     
