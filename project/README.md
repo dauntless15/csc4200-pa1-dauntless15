@@ -6,7 +6,7 @@ the **Project Handbook**, the **ETP/1 Specification**, and the **PA1 brief**.
 **Student:** _Vidhula Oviya Vasanthan_ (`dauntless15`)
 **Course:** CSC 4200 / CSC 5200 (delete one) — Fall 2026
 **Language:** _Python_
-**Submitted commit:** _the SHA you paste into Canvas_
+**Submitted commit:** _d812dc51fc196428d8b5c393d24e10c3ea312bb1_
 
 | Path | What it is |
 |---|---|
